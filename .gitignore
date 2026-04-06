@@ -1,0 +1,18 @@
+# Audio assets and derived transcript files (generated)
+audio*.json
+audio*.srt
+audio*.tsv
+audio*.txt
+audio*.vtt
+
+# Common audio/media file types
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.webm
+*.mp4
+
