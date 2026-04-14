@@ -62,6 +62,9 @@ const blankDaily = (date: string): string => `# ${date}
 - [ ] Chemo + magnesium (21:00)
 - [ ] Melatonin (before bed)
 
+## Sleep
+(not logged)
+
 ## Exercise
 (none logged)
 

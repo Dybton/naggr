@@ -54,7 +54,7 @@ export const startScheduler = (
         );
       },
       systemNote:
-        "This is a scheduled MORNING SUPPLEMENT REMINDER. The user hasn't taken their morning supplements yet. Generate one short reminder in your normal voice.",
+        "This is a scheduled MORNING CHECK-IN. Ask how the user slept (and use write_file to log their answer in the Sleep section of today's daily log when they reply). Also remind them about their morning supplements if not yet taken. Generate one short message in your normal voice.",
     },
     {
       cronExpr: "0 13 * * *",
@@ -103,7 +103,7 @@ export const startScheduler = (
         return !/### /i.test(log);
       },
       systemNote:
-        "This is the END OF DAY summary. Read today's daily log, then send a brief summary (max 5-6 lines). Also create tomorrow's daily log using write_file if it doesn't exist.",
+        "This is the END OF DAY summary. Read today's daily log, then send a brief summary (max 5-6 lines) including sleep quality if logged. Also create tomorrow's daily log using write_file if it doesn't exist.",
     },
     {
       cronExpr: "30 21 * * *",
