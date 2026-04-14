@@ -2,8 +2,7 @@
 name: check-status
 description: "Show today's progress summary — calories, protein, supplements, and overall status."
 metadata:
-  openclaw:
-    emoji: "📊"
+  emoji: "📊"
 ---
 
 # Check Status

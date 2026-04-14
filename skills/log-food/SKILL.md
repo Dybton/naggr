@@ -2,8 +2,7 @@
 name: log-food
 description: "Log a meal from text, image, or voice input. Estimates macros via LLM, appends to daily log, updates running totals."
 metadata:
-  openclaw:
-    emoji: "🍽️"
+  emoji: "🍽️"
 ---
 
 # Log Food

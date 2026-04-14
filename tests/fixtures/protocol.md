@@ -17,8 +17,6 @@
 | Name | Dose | When | Anchor habit |
 |------|------|------|-------------|
 | Vitamin D3 | 5000 IU x3 | Morning | With breakfast |
-| Vitamin B12 | (dose?) | Morning | With breakfast |
-| Vitamin C | (dose?) | Morning | With breakfast |
 | Magnesium glycinate | (dose?) | Morning + Evening (21:00) | Morning routine + wind-down |
 | Zinc | (dose?) | Morning | With breakfast |
 | Omega-3 | included in morning shake | Morning | Part of daily shake |
@@ -42,5 +40,5 @@
 | 07:30 | Morning supplements | Yes, after 14-day streak |
 | 12:30 | Lunch check-in ("what did you have?") | Yes |
 | 18:00 | Dinner check-in | Yes |
-| 20:30 | Chemo + magnesium | No |
+| 21:00 | Chemo + magnesium | No |
 | 22:30 | Still up? Gentle nudge | No |

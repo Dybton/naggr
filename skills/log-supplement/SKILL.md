@@ -2,8 +2,7 @@
 name: log-supplement
 description: "Mark supplements as taken in the daily log and update streak count."
 metadata:
-  openclaw:
-    emoji: "💊"
+  emoji: "💊"
 ---
 
 # Log Supplement

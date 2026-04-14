@@ -2,8 +2,7 @@
 name: daily-summary
 description: "End-of-day summary triggered by heartbeat at 22:30 — compile stats, update streaks, close the day."
 metadata:
-  openclaw:
-    emoji: "📝"
+  emoji: "📝"
 ---
 
 # Daily Summary

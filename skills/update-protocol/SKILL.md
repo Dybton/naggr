@@ -2,8 +2,7 @@
 name: update-protocol
 description: "Update the health protocol via natural language — change supplements, reminder times, targets, or preferences."
 metadata:
-  openclaw:
-    emoji: "⚙️"
+  emoji: "⚙️"
 ---
 
 # Update Protocol
