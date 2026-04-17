@@ -54,6 +54,15 @@ const blankDaily = (date: string): string => `# ${date}
 
 ## Meals
 
+### Breakfast
+(not logged)
+
+### Lunch
+(not logged)
+
+### Dinner
+(not logged)
+
 ## Supplements
 - [ ] Omega-3 (with breakfast shake)
 - [ ] Vitamin D3 5000 IU x3 (with breakfast)
@@ -182,6 +191,8 @@ RULES:
 - Reply in 1-3 sentences. This is texting.
 - Platform: Telegram. No markdown tables. Use **bold** for emphasis.
 - When logging food, estimate macros yourself based on typical Danish portions. Update the Running Totals section to match.
+- Meals go under ### Breakfast / ### Lunch / ### Dinner h3 headings — never use **bold** for meal labels. Replace "(not logged)" with the meal contents when logging.
+- When computing daily totals (calories, protein, etc.), ONLY count meals listed in today's daily log file shown above. Ignore food mentioned in earlier conversation messages — those may be from previous days. The daily log is the single source of truth for today's intake.
 - When the user says "done" or similar after a supplement reminder, mark the relevant supplements as [x] with the current time.
 - Use write_file to save any changes. Always write the COMPLETE file — not a partial update.
 - Be honest about numbers. Don't exaggerate streaks or progress. 1 day is not a "solid streak".

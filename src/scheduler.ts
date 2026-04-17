@@ -26,6 +26,30 @@ const readTodayLog = (): string => {
   return readFileSync(path, "utf-8");
 };
 
+/**
+ * Checks whether a specific meal section (Breakfast/Lunch/Dinner) in today's
+ * log has been filled in.
+ *
+ * The daily template pre-seeds each meal with a "### Meal" heading followed by
+ * the literal placeholder "(not logged)". Once the user eats and the LLM logs
+ * the meal, the placeholder is replaced with real content. This function
+ * grabs the text between "### <meal>" and the next ## or ### heading, trims
+ * it, and returns true only if what's left is NOT the placeholder.
+ *
+ * Returns false when:
+ *   - the meal heading is missing entirely (log is malformed or pre-template)
+ *   - the placeholder "(not logged)" is still there (meal not logged yet)
+ */
+const mealLogged = (log: string, meal: string): boolean => {
+  const pattern = new RegExp(
+    `### ${meal}\\s*\\n([\\s\\S]*?)(?=\\n##|$)`,
+    "i"
+  );
+  const match = log.match(pattern);
+  if (!match) return false;
+  return match[1].trim().toLowerCase() !== "(not logged)";
+};
+
 interface ReminderConfig {
   cronExpr: string;
   type: string;
@@ -54,15 +78,12 @@ export const startScheduler = (
         );
       },
       systemNote:
-        "This is a scheduled MORNING CHECK-IN. Ask how the user slept (and use write_file to log their answer in the Sleep section of today's daily log when they reply). Also remind them about their morning supplements if not yet taken. Generate one short message in your normal voice.",
+        "This is a scheduled MORNING CHECK-IN. Send one short message in your normal voice asking how the user slept and reminding them about their morning supplements. Do NOT call any tools on this turn — just generate the text reply. When the user replies with their sleep details on a later turn, THAT is when you use write_file to log it in the Sleep section of today's daily log.",
     },
     {
       cronExpr: "0 13 * * *",
       type: "MEAL_CHECKIN",
-      check: () => {
-        const log = readTodayLog();
-        return /### Lunch/i.test(log);
-      },
+      check: () => mealLogged(readTodayLog(), "Lunch"),
       systemNote: () => {
         const log = readTodayLog();
         const kcalMatch = log.match(/Calories:\s*~(\d+)/);
@@ -78,10 +99,7 @@ export const startScheduler = (
     {
       cronExpr: "0 18 * * *",
       type: "MEAL_CHECKIN",
-      check: () => {
-        const log = readTodayLog();
-        return /### Dinner/i.test(log);
-      },
+      check: () => mealLogged(readTodayLog(), "Dinner"),
       systemNote: () => {
         const log = readTodayLog();
         const kcalMatch = log.match(/Calories:\s*~(\d+)/);
@@ -99,8 +117,11 @@ export const startScheduler = (
       type: "DAILY_SUMMARY",
       check: () => {
         const log = readTodayLog();
-        // Don't summarize if no meals were logged
-        return !/### /i.test(log);
+        // Skip summary only when nothing at all was eaten today.
+        const noMeals = !mealLogged(log, "Breakfast")
+          && !mealLogged(log, "Lunch")
+          && !mealLogged(log, "Dinner");
+        return noMeals;
       },
       systemNote:
         "This is the END OF DAY summary. Read today's daily log, then send a brief summary (max 5-6 lines) including sleep quality if logged. Also create tomorrow's daily log using write_file if it doesn't exist.",
