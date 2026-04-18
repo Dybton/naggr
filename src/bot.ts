@@ -1,69 +1,106 @@
 /**
  * Telegram bot setup and message routing.
- * Listens for text, voice, and photo messages on Telegram,
- * then passes them through the LLM turn loop and replies.
+ *
+ * Listens for text, voice, and photo messages on Telegram, passes each
+ * one through the LLM turn loop, and replies. Two small pieces of
+ * bookkeeping live here:
+ *
+ *   1. An inbound chatId gate: every handler early-returns unless the
+ *      incoming message comes from JAKOB_CHAT_ID. Without this gate,
+ *      anyone who discovers the bot's handle would get an LLM with
+ *      file-write access to Jakob's health data.
+ *
+ *   2. A tiny in-process message buffer per chat (last few messages),
+ *      so mid-conversation references like "actually make it 500" work
+ *      even though the LLM is otherwise stateless. The buffer is not
+ *      persisted — it's cleared on process restart, and the daily
+ *      markdown file is the real source of cross-restart continuity.
  */
 
 import { Bot, type Context } from "grammy";
 import { callTurn, type ChatMessage } from "./llm.js";
 import { transcribeVoice } from "./voice.js";
 
-// In-memory ring buffer of recent messages per chat, keyed by chatId
-const chatHistory = new Map<number, ChatMessage[]>();
-const MAX_HISTORY = 10;
+/** Total messages kept per chat (user + bot combined). FIFO-trimmed. */
+const BUFFER_SIZE = 4;
 
-/** Returns the chat history array for a given chat, creating one if it doesn't exist. */
+/** Parsed at module load so the gate runs synchronously on every update. */
+const getAllowedChatId = (): number => {
+  const raw = process.env.JAKOB_CHAT_ID;
+  if (!raw) {
+    throw new Error("JAKOB_CHAT_ID must be set in the environment");
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n)) {
+    throw new Error(`JAKOB_CHAT_ID must be an integer, got: ${raw}`);
+  }
+  return n;
+};
+
+const ALLOWED_CHAT_ID = getAllowedChatId();
+
+/** Returns true when the update comes from the one allowed chat. */
+const isAllowed = (ctx: Context): boolean => ctx.chat?.id === ALLOWED_CHAT_ID;
+
+// In-memory tiny buffer of recent messages, keyed by chatId.
+const chatHistory = new Map<number, ChatMessage[]>();
+
+/** Returns the buffer for a given chat, creating an empty one if needed. */
 const getHistory = (chatId: number): ChatMessage[] => {
   if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
   return chatHistory.get(chatId)!;
 };
 
-/** Adds a message to the chat history ring buffer, trimming old entries to keep the last MAX_HISTORY pairs. */
+/** Pushes a message into the buffer and trims back down to BUFFER_SIZE. */
 const pushHistory = (chatId: number, msg: ChatMessage): void => {
-  const history = getHistory(chatId);
-  history.push(msg);
-  if (history.length > MAX_HISTORY * 2) {
-    history.splice(0, history.length - MAX_HISTORY * 2);
+  const h = getHistory(chatId);
+  h.push(msg);
+  if (h.length > BUFFER_SIZE) {
+    h.splice(0, h.length - BUFFER_SIZE);
   }
 };
 
-/** Takes a text message, sends it through the LLM, and replies on Telegram. */
-const handleMessage = async (ctx: Context, text: string): Promise<void> => {
+/** Runs a text-input turn through callTurn and sends the reply on Telegram. */
+const handleText = async (ctx: Context, text: string): Promise<void> => {
   const chatId = ctx.chat!.id;
+  const userMsg: ChatMessage = { role: "user", content: text };
+  pushHistory(chatId, userMsg);
 
-  pushHistory(chatId, { role: "user", content: text });
-
-  const { reply, usage } = await callTurn(getHistory(chatId));
+  const { reply, usage } = await callTurn({
+    text,
+    history: getHistory(chatId).slice(0, -1), // history excludes the message we just pushed
+  });
   console.log(
     `[turn] "${text.slice(0, 40)}" | tokens: ${usage.input}in/${usage.output}out`
   );
 
-  pushHistory(chatId, { role: "assistant", content: reply });
-  await ctx.reply(reply);
+  if (reply) {
+    pushHistory(chatId, { role: "assistant", content: reply });
+    await ctx.reply(reply);
+  }
 };
 
 /** Creates and configures the Grammy bot with handlers for text, voice, and photo messages. */
 export const createBot = (token: string): Bot => {
   const bot = new Bot(token);
 
-  // Catch errors so the bot doesn't crash on a single bad message
   bot.catch((err) => {
     console.error("[bot] Error handling update:", err.message);
   });
 
-  // Handle text messages
   bot.on("message:text", async (ctx) => {
-    await handleMessage(ctx, ctx.message.text);
+    if (!isAllowed(ctx)) return;
+    await handleText(ctx, ctx.message.text);
   });
 
-  // Handle voice messages — downloads the audio, transcribes via Whisper, then treats it as text
   bot.on("message:voice", async (ctx) => {
+    if (!isAllowed(ctx)) return;
     try {
       const file = await ctx.getFile();
       const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
       const text = await transcribeVoice(fileUrl);
       console.log(`[voice] Transcribed: "${text}"`);
-      await handleMessage(ctx, text);
+      await handleText(ctx, text);
     } catch (err) {
       console.error("[voice] Transcription failed:", err);
       await ctx.reply(
@@ -72,11 +109,11 @@ export const createBot = (token: string): Bot => {
     }
   });
 
-  // Handle photos — downloads the image, base64-encodes it, and sends it to the LLM with the caption
   bot.on("message:photo", async (ctx) => {
+    if (!isAllowed(ctx)) return;
+
     const file = await ctx.getFile();
     const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-
     const response = await fetch(fileUrl);
     const buffer = Buffer.from(await response.arrayBuffer());
     const base64 = buffer.toString("base64");
@@ -84,6 +121,8 @@ export const createBot = (token: string): Bot => {
     const caption = ctx.message.caption || "Food photo";
     const chatId = ctx.chat.id;
 
+    // Preserve the photo+caption as a structured user message in the
+    // buffer so a later turn can still refer to it ("make it 500").
     const userContent: ChatMessage = {
       role: "user",
       content: [
@@ -98,21 +137,21 @@ export const createBot = (token: string): Bot => {
         { type: "text", text: caption },
       ],
     };
-
     pushHistory(chatId, userContent);
 
-    const { reply, usage } = await callTurn(getHistory(chatId));
+    const { reply, usage } = await callTurn({
+      image: { base64, mediaType: "image/jpeg", caption },
+      history: getHistory(chatId).slice(0, -1),
+    });
     console.log(
       `[turn] photo | tokens: ${usage.input}in/${usage.output}out`
     );
 
-    pushHistory(chatId, { role: "assistant", content: reply });
-    await ctx.reply(reply);
+    if (reply) {
+      pushHistory(chatId, { role: "assistant", content: reply });
+      await ctx.reply(reply);
+    }
   });
 
   return bot;
 };
-
-/** Sends a message to a specific chat. Used by the scheduler to push reminders. */
-export const sendMessage = (bot: Bot, chatId: number, text: string) =>
-  bot.api.sendMessage(chatId, text);

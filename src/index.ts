@@ -1,7 +1,7 @@
 /**
  * Entry point for the Naggr bot.
- * Loads environment variables, boots the persona cache,
- * then starts the Telegram bot and scheduler.
+ * Loads environment variables, warms the SOUL.md cache,
+ * then starts the Telegram bot and the scheduled check-ins.
  */
 
 import { config } from "dotenv";
@@ -12,7 +12,6 @@ import { loadSoul } from "./storage/persona.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const JAKOB_CHAT_ID = process.env.JAKOB_CHAT_ID;
-const LAERKE_CHAT_ID = process.env.LAERKE_CHAT_ID;
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN in .env");
@@ -23,6 +22,12 @@ if (!JAKOB_CHAT_ID) {
   process.exit(1);
 }
 
+const chatId = Number(JAKOB_CHAT_ID);
+if (!Number.isInteger(chatId)) {
+  console.error(`JAKOB_CHAT_ID must be an integer, got: ${JAKOB_CHAT_ID}`);
+  process.exit(1);
+}
+
 /** Boots all services: persona cache, bot, and scheduler. */
 const main = async () => {
   loadSoul();
@@ -30,11 +35,7 @@ const main = async () => {
 
   const bot = createBot(TELEGRAM_BOT_TOKEN!);
 
-  startScheduler(
-    bot,
-    parseInt(JAKOB_CHAT_ID!),
-    LAERKE_CHAT_ID ? parseInt(LAERKE_CHAT_ID) : undefined
-  );
+  startScheduler(bot, chatId);
   console.log("[init] Scheduler started");
 
   console.log("[init] Starting Telegram bot...");
