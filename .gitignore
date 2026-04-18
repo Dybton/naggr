@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 *.bak
+.claude/
 
 # Audio assets and derived transcript files (generated)
 audio*.json
