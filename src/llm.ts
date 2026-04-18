@@ -7,28 +7,28 @@
  * decides for itself what to ask the user and what to log. No code-side
  * schema, no regex parsing of markdown content.
  *
- * Both user-initiated turns (from bot.ts) and scheduled turns (from
- * scheduler.ts) go through `callTurn`. Scheduled turns pass a
- * `systemNote` and no user text; user-initiated turns pass `text` or
- * `image` plus an optional short history buffer.
+ * Concurrency: every `callTurn` is serialised per `chatId` via a small
+ * promise queue. Without this, a voice message at 08:59:59 and the
+ * 09:00 cron tick could both read today's daily file, both call the
+ * LLM, and race each other's `write_file` — producing a torn log.
  *
- * Before every write, we snapshot the target file to `<name>.bak` so a
- * bad edit can be rolled back manually.
+ * Error handling: callers decide what empty / thrown replies mean.
+ * - `bot.ts` turns empty into a friendly fallback message.
+ * - `scheduler.ts` treats empty (and the `<silent>` sentinel) as
+ *   "stay silent on this tick."
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { loadSoul } from "./storage/persona.js";
-
-const DATA_DIR = join(__dirname, "..");
-const DAILY_DIR = join(DATA_DIR, "daily");
-const PROTOCOL_PATH = join(DATA_DIR, "protocol.md");
+import { DAILY_DIR, PROTOCOL_PATH } from "./paths.js";
+import { parseDailyDate } from "./daily-path.js";
 
 /**
  * Anthropic model alias. If this identifier ever stops resolving, check
- * Anthropic's current model listing — they may require a dated form like
- * `claude-sonnet-4-6-YYYYMMDD`.
+ * Anthropic's current model listing — they may require a dated form
+ * like `claude-sonnet-4-6-YYYYMMDD`.
  */
 const MODEL = "claude-sonnet-4-6";
 
@@ -38,57 +38,24 @@ const MAX_TOOL_ROUNDS = 5;
 /** Max output tokens per Anthropic message. */
 const MAX_TOKENS = 1024;
 
+/**
+ * Per-request Anthropic timeout. The SDK default is 600 seconds, which
+ * would pin the event loop for 10 minutes on a single hung response.
+ * 60s is generous for a small-prompt chat reply.
+ */
+const API_TIMEOUT_MS = 60_000;
+
 let client: Anthropic | null = null;
 
 /** Returns the Anthropic client, creating it on first use (after dotenv has loaded). */
 const getClient = (): Anthropic => {
-  if (!client) client = new Anthropic();
+  if (!client) client = new Anthropic({ timeout: API_TIMEOUT_MS });
   return client;
 };
 
 /** Returns today's date as YYYY-MM-DD in Copenhagen timezone. */
 const todayStr = (): string =>
   new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Copenhagen" });
-
-/**
- * Checks whether a tool-call `name` is a valid `daily/YYYY-MM-DD.md` path,
- * without using a regex. The steps are:
- *   1. Must start with `daily/` and end with `.md`.
- *   2. The middle segment is split on `-` into exactly 3 parts with
- *      lengths 4/2/2.
- *   3. Each part must be all digits.
- *   4. The date must round-trip through Date: parsing and re-serialising
- *      it to ISO `YYYY-MM-DD` must yield the same string (rejects things
- *      like `2026-02-30` that the constructor silently normalises).
- *
- * Returns the `YYYY-MM-DD` stem on success, `null` otherwise.
- */
-const parseDailyDate = (name: string): string | null => {
-  const prefix = "daily/";
-  const suffix = ".md";
-  if (!name.startsWith(prefix) || !name.endsWith(suffix)) return null;
-
-  const stem = name.slice(prefix.length, name.length - suffix.length);
-  const parts = stem.split("-");
-  if (parts.length !== 3) return null;
-
-  const [y, m, d] = parts;
-  if (y.length !== 4 || m.length !== 2 || d.length !== 2) return null;
-
-  const isDigits = (s: string): boolean => {
-    for (const ch of s) {
-      if (ch < "0" || ch > "9") return false;
-    }
-    return true;
-  };
-  if (!isDigits(y) || !isDigits(m) || !isDigits(d)) return null;
-
-  const asDate = new Date(`${stem}T00:00:00Z`);
-  if (isNaN(asDate.getTime())) return null;
-  if (asDate.toISOString().slice(0, 10) !== stem) return null;
-
-  return stem;
-};
 
 /** Resolves a tool-call `name` to an absolute path, or `null` if the name is not allowed. */
 const resolveFile = (name: string): string | null => {
@@ -101,12 +68,15 @@ const resolveFile = (name: string): string | null => {
 /** Returns a blank daily log: just the date header and two newlines. */
 const blankDaily = (date: string): string => `# ${date}\n\n`;
 
-/** Makes sure today's daily log file exists. Creates it from the minimal template if missing. */
-const ensureDailyLog = (date?: string): string => {
-  const d = date ?? todayStr();
-  const p = join(DAILY_DIR, `${d}.md`);
+/**
+ * Makes sure the daily log for the given date exists on disk. Creates
+ * `daily/` if it's missing and writes a blank-template file for the
+ * date if one doesn't already exist. Returns the absolute path.
+ */
+const ensureDailyLog = (date: string): string => {
+  const p = join(DAILY_DIR, `${date}.md`);
   if (!existsSync(DAILY_DIR)) mkdirSync(DAILY_DIR, { recursive: true });
-  if (!existsSync(p)) writeFileSync(p, blankDaily(d), "utf-8");
+  if (!existsSync(p)) writeFileSync(p, blankDaily(date), "utf-8");
   return p;
 };
 
@@ -136,11 +106,11 @@ const tools: Anthropic.Messages.Tool[] = [
     name: "read_file",
     description: "Read protocol.md or a daily log at daily/YYYY-MM-DD.md",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         name: {
-          type: "string" as const,
-          description: "File to read, e.g. 'protocol.md' or 'daily/2026-04-18.md'",
+          type: "string",
+          description: "File to read, e.g. 'protocol.md' or 'daily/YYYY-MM-DD.md'",
         },
       },
       required: ["name"],
@@ -150,14 +120,14 @@ const tools: Anthropic.Messages.Tool[] = [
     name: "write_file",
     description: "Overwrite protocol.md or a daily log. A .bak snapshot is saved automatically. Write the COMPLETE file contents — not a diff.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         name: {
-          type: "string" as const,
-          description: "File to write, e.g. 'protocol.md' or 'daily/2026-04-18.md'",
+          type: "string",
+          description: "File to write, e.g. 'protocol.md' or 'daily/YYYY-MM-DD.md'",
         },
         content: {
-          type: "string" as const,
+          type: "string",
           description: "The full new contents of the file",
         },
       },
@@ -254,6 +224,9 @@ export interface TurnInput {
  *     scheduled call), we synthesize a stub user message (`"."`) — the
  *     Anthropic API requires at least one user message, and the real
  *     prompt-shaping happens inside the system prompt's systemNote.
+ *   - If the last message in `history` is an assistant message and no new
+ *     text/image is provided, we also append the stub — Anthropic rejects
+ *     a conversation that ends on the assistant role.
  */
 const buildMessages = (input: TurnInput): Anthropic.Messages.MessageParam[] => {
   const msgs: Anthropic.Messages.MessageParam[] = (input.history ?? []).map(
@@ -279,39 +252,54 @@ const buildMessages = (input: TurnInput): Anthropic.Messages.MessageParam[] => {
     msgs.push({ role: "user", content: input.text });
   }
 
-  if (msgs.length === 0) {
+  const last = msgs[msgs.length - 1];
+  if (!last || last.role === "assistant") {
     msgs.push({ role: "user", content: "." });
   }
 
   return msgs;
 };
 
-/** Routes a tool call to read_file or write_file. */
-const executeTool = (name: string, input: Record<string, string>): string => {
+/**
+ * Narrows an untyped tool-call input to a concrete `{name, content?}`
+ * shape. The Anthropic SDK types `ToolUseBlock.input` as `unknown` — a
+ * blind cast to `Record<string, string>` would silently let a malformed
+ * response reach our filesystem code. This guard keeps the cast honest.
+ */
+const asToolInput = (input: unknown): { name?: string; content?: string } => {
+  if (typeof input !== "object" || input === null) return {};
+  const rec = input as Record<string, unknown>;
+  const out: { name?: string; content?: string } = {};
+  if (typeof rec.name === "string") out.name = rec.name;
+  if (typeof rec.content === "string") out.content = rec.content;
+  return out;
+};
+
+/**
+ * Routes a tool call to read_file or write_file after validating that
+ * the required inputs are actually strings.
+ */
+const executeTool = (name: string, input: unknown): string => {
+  const parsed = asToolInput(input);
   switch (name) {
     case "read_file":
-      return readFile(input.name);
+      if (!parsed.name) return JSON.stringify({ error: "read_file requires a string 'name'" });
+      return readFile(parsed.name);
     case "write_file":
-      return writeFile(input.name, input.content);
+      if (!parsed.name || parsed.content === undefined) {
+        return JSON.stringify({ error: "write_file requires string 'name' and 'content'" });
+      }
+      return writeFile(parsed.name, parsed.content);
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
 };
 
 /**
- * The single entrypoint for a conversation turn with Claude.
- *
- * Steps:
- *   1. Build the system prompt from disk (SOUL + time + protocol + today + rules + optional systemNote).
- *   2. Build the messages array from history and/or text/image, synthesising a stub user message if the caller has none.
- *   3. Send to Anthropic. If Claude calls read_file or write_file, execute them and loop up to MAX_TOOL_ROUNDS times.
- *   4. Return the final text reply (possibly empty) plus input/output token counts.
- *
- * Callers decide what an empty reply means — bot.ts sends it unchanged,
- * scheduler.ts treats it (and the literal `<silent>` sentinel) as
- * "don't message the user."
+ * Runs the Anthropic request / tool-call loop for one turn. Extracted
+ * from `callTurn` so the mutex wrapper below can stay small.
  */
-export const callTurn = async (
+const runTurn = async (
   input: TurnInput
 ): Promise<{ reply: string; usage: { input: number; output: number } }> => {
   const system = buildSystemPrompt(input.systemNote);
@@ -348,7 +336,7 @@ export const callTurn = async (
       toolBlocks.map((block) => ({
         type: "tool_result" as const,
         tool_use_id: block.id,
-        content: executeTool(block.name, block.input as Record<string, string>),
+        content: executeTool(block.name, block.input),
       }));
 
     currentMessages = [
@@ -358,8 +346,57 @@ export const callTurn = async (
     ];
   }
 
+  console.warn(`[llm] tool-call loop exhausted ${MAX_TOOL_ROUNDS} rounds without a final text reply`);
   return {
     reply: "",
     usage: { input: totalInput, output: totalOutput },
   };
 };
+
+/**
+ * Per-chat serial queue. Each chatId maps to a promise chain — a new
+ * `callTurn` waits for the chain to drain before running, then its own
+ * work is appended to the chain for the next caller to wait on.
+ *
+ * Why: user-initiated and scheduled turns both arrive via `callTurn`
+ * and both may write today's daily file. Without serialisation, an
+ * 08:59:59 voice turn and the 09:00 cron tick could both read a stale
+ * file and stomp each other's writes. Serialising per chat makes
+ * "only one Claude turn at a time per user" a hard code invariant.
+ */
+const chatQueues = new Map<number, Promise<unknown>>();
+
+/**
+ * Wraps `fn` in the chatId's serial queue. Waits for the previous turn
+ * (if any) to finish, runs `fn`, and records its completion promise as
+ * the new tail for the next caller to wait on. Prior-turn failures do
+ * not poison the chain — later turns still run.
+ */
+const withChatLock = <T>(chatId: number, fn: () => Promise<T>): Promise<T> => {
+  const previous = chatQueues.get(chatId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(fn);
+  // Absorb any rejection so a failed turn doesn't surface as an
+  // unhandled rejection on the queue tail.
+  chatQueues.set(chatId, next.catch(() => undefined));
+  return next;
+};
+
+/**
+ * The single entrypoint for a conversation turn with Claude.
+ *
+ * Serialises per-chat so turns for the same chatId never run
+ * concurrently (see `withChatLock`), then:
+ *   1. Builds the system prompt from disk (SOUL + time + protocol + today + rules + optional systemNote).
+ *   2. Builds the messages array from history and/or text/image, synthesising a stub user message if needed.
+ *   3. Sends to Anthropic. Executes any read_file/write_file tool calls and loops up to `MAX_TOOL_ROUNDS` times.
+ *   4. Returns the final text reply (possibly empty) plus input/output token counts.
+ *
+ * An empty reply means either the LLM returned no text or the tool
+ * loop exhausted. Callers decide what to do with it (scheduler treats
+ * empty as silent; bot sends a fallback message).
+ */
+export const callTurn = (
+  chatId: number,
+  input: TurnInput
+): Promise<{ reply: string; usage: { input: number; output: number } }> =>
+  withChatLock(chatId, () => runTurn(input));

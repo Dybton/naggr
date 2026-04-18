@@ -1,7 +1,11 @@
 /**
  * Entry point for the Naggr bot.
- * Loads environment variables, warms the SOUL.md cache,
- * then starts the Telegram bot and the scheduled check-ins.
+ *
+ * Validates the two required environment variables (Telegram token and
+ * the single allowed chatId), warms the SOUL.md persona cache, then
+ * starts the Telegram bot and the scheduled check-ins. This file is
+ * the single source of truth for env-var parsing — `bot.ts` receives
+ * the validated chatId as a parameter rather than re-reading the env.
  */
 
 import { config } from "dotenv";
@@ -23,8 +27,12 @@ if (!JAKOB_CHAT_ID) {
 }
 
 const chatId = Number(JAKOB_CHAT_ID);
-if (!Number.isInteger(chatId)) {
-  console.error(`JAKOB_CHAT_ID must be an integer, got: ${JAKOB_CHAT_ID}`);
+// Reject NaN, non-integers, 0 (what `Number(" ")` yields), and unsafe
+// integers (Telegram chat IDs fit in 53 bits but `1234567890…` strings
+// that overflow would silently round). A zero here would silently deny
+// every real chat without a user-visible failure mode.
+if (!Number.isSafeInteger(chatId) || chatId === 0) {
+  console.error(`JAKOB_CHAT_ID must be a safe nonzero integer, got: ${JSON.stringify(JAKOB_CHAT_ID)}`);
   process.exit(1);
 }
 
@@ -33,12 +41,12 @@ const main = async () => {
   loadSoul();
   console.log("[init] SOUL.md loaded");
 
-  const bot = createBot(TELEGRAM_BOT_TOKEN!);
+  const bot = createBot(TELEGRAM_BOT_TOKEN!, chatId);
 
   startScheduler(bot, chatId);
   console.log("[init] Scheduler started");
 
-  console.log("[init] Starting Telegram bot...");
+  console.log(`[init] Starting Telegram bot (allowed chatId: ${chatId})...`);
   bot.start({
     onStart: () => console.log("[bot] Running"),
   });

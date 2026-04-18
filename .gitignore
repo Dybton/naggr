@@ -3,6 +3,8 @@ dist/
 .env
 *.bak
 .claude/
+.context/
+daily/
 
 # Audio assets and derived transcript files (generated)
 audio*.json
