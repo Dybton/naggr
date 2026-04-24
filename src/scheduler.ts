@@ -73,7 +73,7 @@ const CHECK_INS: readonly CheckIn[] = [
     cronExpr: "30 8 * * *",
     label: "MORNING",
     systemNote:
-      "This is the 08:30 MORNING CHECK-IN. The protocol and today's log are in the system prompt above. Ask about whatever is still missing from: sleep, morning supplements, Shake 1. Ask in one concise Telegram message. " +
+      "This is the 08:30 MORNING CHECK-IN. The protocol and today's log are in the system prompt above. Ask about whatever is still missing from: sleep (slot name: Sleep), morning supplements (slot name: Morning supplements), Shake 1 (slot name: Shake 1). Ask in one concise Telegram message. " +
       `If all three are already logged for today, reply with exactly the string ${SILENT} and call no tools. Do not add any text after ${SILENT}.`,
   },
   {
@@ -134,10 +134,11 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 /**
  * Calls the LLM for one scheduled check-in.
  *
- * On a transient error: waits RETRY_DELAY_MS and tries exactly once
- * more. Any further failure is logged and swallowed — no user-facing
- * message is sent, matching spec1's "no retries" rule for the reminder
- * itself.
+ * On a transient error (5xx / connection reset / timeout): waits
+ * RETRY_DELAY_MS and tries exactly one more time. If the retry also
+ * fails, the error is logged and swallowed — no user-facing Telegram
+ * message is sent, and the scheduler quietly gives up for this tick so
+ * one bad minute doesn't knock node-cron over.
  *
  * On a non-transient error (4xx, bad model ID, auth): logs with a
  * distinct "(non-transient — not retrying)" tag so a recurring config
@@ -185,13 +186,19 @@ const runCheckIn = async (
 
   const trimmed = result.reply.trim();
   const isSilent = !trimmed || trimmed.startsWith(SILENT);
-  console.log(
-    `[scheduler] ${checkIn.label} | tokens: ${result.usage.input}in/${result.usage.output}out | ${isSilent ? "silent" : `reply: "${trimmed.slice(0, 60)}"`}`
-  );
 
-  if (isSilent) return;
+  if (isSilent) {
+    console.log(
+      `[scheduler] ${checkIn.label} | tokens: ${result.usage.input}in/${result.usage.output}out | silent`
+    );
+    return;
+  }
 
   const payload = `${WAKE_PREFIX}\n\n${trimmed}`;
+  console.log(
+    `[scheduler] ${checkIn.label} | tokens: ${result.usage.input}in/${result.usage.output}out | sending: "${payload.slice(0, 80)}"`
+  );
+
   try {
     await bot.api.sendMessage(chatId, payload);
   } catch (err) {
